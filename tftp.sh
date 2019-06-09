@@ -9,7 +9,7 @@
 #
 ###############################################################################
 
-TFTPPORT=6969
+port=69
 
 pkt_type_e=(NULL RRQ WRQ DATA ACK ERROR)
 
@@ -87,38 +87,118 @@ function rx_wrq () {
     tx_ack $blocknum
 }
 
-
+function rx_rrq () {
+    die RRQ serve not yet supported
+}
 
 function fini() {
     rm /tmp/ddstats
     rm /tmp/tftp{in,out}
 }
 
-mkfifo /tmp/tftp{in,out}
-mkfifo /tmp/ddstats
 
-trap fini EXIT
+function serve () {
+    port="$1"
+    rootdir="$2"
+    mkfifo /tmp/tftp{in,out}
+    mkfifo /tmp/ddstats
 
-nc -l -u $TFTPPORT > /tmp/tftpout <> /tmp/tftpin &
+    trap fini EXIT
 
-pkttype=${pkt_type_e[$(nsread < /tmp/tftpout)]}
-file=$(cstrread < /tmp/tftpout)
-mode=$(cstrread < /tmp/tftpout)
-mode=${mode,,}
+    nc -l -u $port > /tmp/tftpout <> /tmp/tftpin &
 
-if [ ! "$mode" = "octet" ]; then
-    die "Only octet mode supported"
-fi
+    pkttype=${pkt_type_e[$(nsread < /tmp/tftpout)]}
+    file=$(cstrread < /tmp/tftpout)
+    mode=$(cstrread < /tmp/tftpout)
+    mode=${mode,,}
 
-file="${file#/}"
+    if [ ! "$mode" = "octet" ]; then
+        die "Only octet mode supported"
+    fi
 
-case "$pkttype" in
-"RRQ")
-    rx_rrq "$file"
+    file="${file#/}"
+
+    case "$pkttype" in
+    "RRQ")
+        rx_rrq < "${rootdir}/${file}"
+        ;;
+    "WRQ")
+        rx_wrq > "${rootdir}/${file}"
+        ;;
+    *)
+        die "Unknown packet type $pkttype"
+    esac
+}
+
+function get () {
+    die "GET not yet supported"
+}
+
+function put () {
+    die "PUT not yet supported"
+}
+
+function usage() {
+echo "\
+Usage:
+$0 [OPTION] -R <server root dir>
+$0 [OPTION] -G <GET filename> <server host/address>
+$0 [OPTION] -P <PUT filename> <server host/address>
+    -p <port>             port number
+" 1>&2; exit 1
+}
+
+servecmd=$((2**0))
+getcmd=$((2**1))
+putcmd=$((2**2))
+
+while getopts ":R:G:P:p:" o; do
+    case "${o}" in
+    R)
+        ((cmd|=$servecmd))
+        rootdir=${OPTARG}
+        ;;
+    G)
+        ((cmd|=$getcmd))
+        getfile=${OPTARG}
+        ;;
+    P)
+        ((cmd|=$putcmd))
+        putfile=${OPTARG}
+        ;;
+    p)
+        port=${OPTARG}
+        ;;
+    *)
+        usage
+        ;;
+    esac
+done
+shift $((OPTIND-1))
+
+case "$cmd" in
+$servecmd)
+    if (( $# == 0 )); then
+        serve "$port" "$rootdir"
+    else
+        usage
+    fi
     ;;
-"WRQ")
-    rx_wrq "$file" > "$file"
+$getcmd)
+    if (( $# == 1 )); then
+        get "$1" "$port" "$getfile"
+    else
+        usage
+    fi
+    ;;
+$putcmd)
+    if (( $# == 1 )); then
+        put "$host" "$port" "$putfile"
+    else
+        usage
+    fi
     ;;
 *)
-    die "Unknown packet type $pkttype"
+    usage
+    ;;
 esac
