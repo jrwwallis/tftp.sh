@@ -100,7 +100,9 @@ function rx_rrq () {
 }
 
 function fini() {
+    read < /proc/$tftp_cp_PID/task/$tftp_cp_PID/children
     kill -term $tftp_cp_PID
+    kill $REPLY
 }
 
 
