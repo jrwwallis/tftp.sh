@@ -13,6 +13,8 @@ port=69
 
 pkt_type_e=(NULL RRQ WRQ DATA ACK ERROR)
 
+shopt -u nocasematch
+
 function die () {
     printf "%s\n" "$1" 1>&2
     exit 1
@@ -24,67 +26,73 @@ function hs2nhex () {
 }
 
 function nsread () {
-    hex=$(od -An -N2 -tx1)
-    echo $((0x${hex// }))
+    read -u ${tftp_cp[0]} hexa
+    read -u ${tftp_cp[0]} hexb
+    echo $((0x${hexa// }${hexb// }))
 }
 
 function cstrread () {
-    IFS= read -r -d '' str
-    printf "%s" "$str"
+    str=
+    while read -u ${tftp_cp[0]} hex; do
+	if [ "$hex" = "00" ]; then
+	    break
+	fi
+	printf -v char "\\\x%s" "$hex"
+	str+="$char"
+    done
+    printf "$str"
 }
 
 function tx_ack () {
     blocknum=$1
-    printf "$(hs2nhex 4)$(hs2nhex ${blocknum})" > /tmp/tftpin
+    printf "$(hs2nhex 4)$(hs2nhex ${blocknum})"
 }
 
 function dataread () {
-    dd bs=512 count=1 < /tmp/tftpout 2>/tmp/ddstats &
-    ddpid=$!
-
+    data=
+    sz=0
     while :; do
-        read -t0.1 sz stat _
+	read -t0.1 -u ${tftp_cp[0]} hex
         readerr=$?
-        if (( readerr )); then
-            kill -term $ddpid
-            sz=0
-            break
-        fi
-        if [ "${stat::4}" = "byte" ]; then
-            break
-        fi
-    done < /tmp/ddstats
-    wait $ddpid 2>/dev/null
-    if (( sz == 512 )); then
-        return 1
-    fi
-    return 0
+	if (( readerr )); then
+	    break
+	fi
+	printf -v char "%s" "\\x$hex"
+	data+="$char"
+	((sz++))
+	if ((sz >= 512)); then
+	    break
+	fi
+    done
+    
+    printf "$data"
+    return $readerr
 }
 
 function rx_data () {
     acknum=$1
-    pkttype=${pkt_type_e[$(nsread < /tmp/tftpout)]}
+    pkttype=${pkt_type_e[$(nsread)]}
     if [ ! "$pkttype" = "DATA" ]; then
         die "Not data"
     fi
-    blocknum=$(nsread < /tmp/tftpout)
+    blocknum=$(nsread)
     if (( blocknum != acknum )); then
         die "Wrong block $blocknum != $acknum"
     fi
 
-    dataread < /tmp/tftpout
+    dataread
 }
 
 function rx_wrq () {
     blocknum=0
     while true; do
-        tx_ack $blocknum
+        tx_ack $blocknum >&${tftp_cp[1]}
         ((blocknum++))
-        if rx_data $blocknum; then
+        if ! rx_data $blocknum; then
             break
         fi
     done
-    tx_ack $blocknum
+    tx_ack $blocknum >&${tftp_cp[1]}
 }
 
 function rx_rrq () {
@@ -92,29 +100,25 @@ function rx_rrq () {
 }
 
 function fini() {
-    rm /tmp/ddstats
-    rm /tmp/tftp{in,out}
+    kill -term $tftp_cp_PID
 }
 
 
-function serve () {
-    port="$1"
-    rootdir="$2"
-    mkfifo /tmp/tftp{in,out}
-    mkfifo /tmp/ddstats
+function read_req () {
+    pkttype=${pkt_type_e[$(nsread)]}
+    file=$(cstrread)
+    mode=$(cstrread)
 
-    trap fini EXIT
-
-    nc -l -u $port > /tmp/tftpout <> /tmp/tftpin &
-
-    pkttype=${pkt_type_e[$(nsread < /tmp/tftpout)]}
-    file=$(cstrread < /tmp/tftpout)
-    mode=$(cstrread < /tmp/tftpout)
-    mode=${mode,,}
-
-    if [ ! "$mode" = "octet" ]; then
-        die "Only octet mode supported"
-    fi
+    shopt -s nocasematch
+    case "$mode" in
+    "octet")
+        : ;;
+    "netascii")
+        : ;;
+    *)
+        die "Only octet or netascii mode supported"
+    esac
+    shopt -u nocasematch
 
     file="${file#/}"
 
@@ -128,6 +132,16 @@ function serve () {
     *)
         die "Unknown packet type $pkttype"
     esac
+}
+
+function serve () {
+    port="$1"
+    rootdir="$2"
+
+    trap fini EXIT
+
+    coproc tftp_cp { nc -l -u $port | stdbuf -oL od -An -tx1 -w1 -v ; }
+    read_req
 }
 
 function get () {
